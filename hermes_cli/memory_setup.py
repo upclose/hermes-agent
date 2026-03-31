@@ -125,6 +125,75 @@ def _prompt(label: str, default: str | None = None, secret: bool = False) -> str
 # Provider discovery
 # ---------------------------------------------------------------------------
 
+def _install_dependencies(provider_name: str) -> None:
+    """Install pip dependencies declared in plugin.yaml."""
+    import subprocess
+    from pathlib import Path as _Path
+
+    plugin_dir = _Path(__file__).parent.parent / "plugins" / "memory" / provider_name
+    yaml_path = plugin_dir / "plugin.yaml"
+    if not yaml_path.exists():
+        return
+
+    try:
+        import yaml
+        with open(yaml_path) as f:
+            meta = yaml.safe_load(f) or {}
+    except Exception:
+        return
+
+    pip_deps = meta.get("pip_dependencies", [])
+    if not pip_deps:
+        return
+
+    # Check which packages are missing
+    missing = []
+    for dep in pip_deps:
+        # Normalize: pip package name → import name (rough heuristic)
+        import_name = dep.replace("-", "_").split("[")[0]
+        try:
+            __import__(import_name)
+        except ImportError:
+            missing.append(dep)
+
+    if not missing:
+        return
+
+    print(f"\n  Installing dependencies: {', '.join(missing)}")
+    try:
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--quiet"] + missing,
+            check=True, timeout=120,
+            capture_output=True,
+        )
+        print(f"  ✓ Installed {', '.join(missing)}")
+    except subprocess.CalledProcessError as e:
+        print(f"  ⚠ Failed to install {', '.join(missing)}")
+        stderr = (e.stderr or b"").decode()[:200]
+        if stderr:
+            print(f"    {stderr}")
+        print(f"  Run manually: pip install {' '.join(missing)}")
+    except Exception as e:
+        print(f"  ⚠ Install failed: {e}")
+        print(f"  Run manually: pip install {' '.join(missing)}")
+
+    # Also show external dependencies (non-pip) if any
+    ext_deps = meta.get("external_dependencies", [])
+    for dep in ext_deps:
+        dep_name = dep.get("name", "")
+        check_cmd = dep.get("check", "")
+        install_cmd = dep.get("install", "")
+        if check_cmd:
+            try:
+                subprocess.run(
+                    check_cmd, shell=True, capture_output=True, timeout=5
+                )
+            except Exception:
+                if install_cmd:
+                    print(f"\n  ⚠ '{dep_name}' not found. Install with:")
+                    print(f"    {install_cmd}")
+
+
 def _get_available_providers() -> list:
     """Discover memory providers from plugins/memory/.
 
@@ -194,6 +263,10 @@ def cmd_setup(args) -> None:
         return
 
     name, _, provider = providers[selected]
+
+    # Install pip dependencies if declared in plugin.yaml
+    _install_dependencies(name)
+
     schema = provider.get_config_schema() if hasattr(provider, "get_config_schema") else []
 
     # Provider config section
