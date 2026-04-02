@@ -28,7 +28,6 @@ logger = logging.getLogger(__name__)
 DEFAULT_MAX_RESULT_SIZE_CHARS: int = 50_000
 MAX_TURN_BUDGET_CHARS: int = 200_000
 PREVIEW_SIZE_CHARS: int = 2000
-PREVIEW_SIZE_BYTES = PREVIEW_SIZE_CHARS  # deprecated alias
 PERSISTED_OUTPUT_TAG = "<persisted-output>"
 PERSISTED_OUTPUT_CLOSING_TAG = "</persisted-output>"
 
@@ -179,7 +178,8 @@ def enforce_turn_budget(
         content = msg["content"]
         tool_use_id = msg.get("tool_call_id", f"budget_{idx}")
 
-        result = persist_large_result(content, tool_use_id, storage_dir)
+        result = persist_large_result(content, tool_use_id, storage_dir,
+                                          threshold=0)
         if result:
             replacement = build_persisted_output_message(result)
             total_size -= size

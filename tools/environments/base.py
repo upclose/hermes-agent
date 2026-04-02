@@ -19,6 +19,11 @@ logger = logging.getLogger(__name__)
 # process can extract the remote shell's cwd without a separate round-trip.
 _CWD_MARKER = "__HERMES_CWD__"
 
+# Min seconds between file-sync checks in _before_execute hooks.
+# Remote backends (SSH, Modal, Daytona) skip re-walking the skills
+# directory and re-statting credential files within this window.
+_SYNC_INTERVAL_SECONDS: float = 5.0
+
 
 def get_sandbox_dir() -> Path:
     """Return the host-side root for all sandbox storage (Docker workspaces,
@@ -65,24 +70,23 @@ class _ThreadedProcessHandle:
         self.stdin = None
 
         def _run():
+            # Open the write end exactly once to avoid double-close races.
+            writer = os.fdopen(self._write_fd, "w")
             try:
                 output, exit_code = exec_fn()
-                writer = os.fdopen(self._write_fd, "w")
                 writer.write(output)
-                writer.close()
                 self._returncode = exit_code
             except Exception as e:
                 try:
-                    writer = os.fdopen(self._write_fd, "w")
                     writer.write(str(e))
-                    writer.close()
                 except Exception:
-                    try:
-                        os.close(self._write_fd)
-                    except Exception:
-                        pass
+                    pass
                 self._returncode = 1
             finally:
+                try:
+                    writer.close()
+                except Exception:
+                    pass
                 self._done.set()
 
         self._thread = threading.Thread(target=_run, daemon=True)
@@ -192,6 +196,7 @@ class BaseEnvironment(ABC):
             f"if type declare >/dev/null 2>&1; then "
             f"declare -f >> {self._snapshot_path} 2>/dev/null; fi\n"
             f"alias -p >> {self._snapshot_path} 2>/dev/null || true\n"
+            f"echo 'shopt -s expand_aliases' >> {self._snapshot_path}\n"
             f"echo 'set +e' >> {self._snapshot_path}\n"
             f"echo 'set +u' >> {self._snapshot_path}\n"
             f"printf '{_CWD_MARKER}%s{_CWD_MARKER}' \"$(pwd -P)\"\n"

@@ -7,7 +7,7 @@ from tools.tool_result_storage import (
     MAX_TURN_BUDGET_CHARS,
     PERSISTED_OUTPUT_CLOSING_TAG,
     PERSISTED_OUTPUT_TAG,
-    PREVIEW_SIZE_BYTES,
+    PREVIEW_SIZE_CHARS,
     PersistedResult,
     build_persisted_output_message,
     enforce_turn_budget,
@@ -34,18 +34,18 @@ class TestGeneratePreview:
         # Build content with lines that exceed the budget
         lines = [f"line {i}: " + "x" * 80 for i in range(50)]
         content = "\n".join(lines)
-        assert len(content) > PREVIEW_SIZE_BYTES
+        assert len(content) > PREVIEW_SIZE_CHARS
 
         preview, has_more = generate_preview(content)
         assert has_more is True
-        assert len(preview) <= PREVIEW_SIZE_BYTES
+        assert len(preview) <= PREVIEW_SIZE_CHARS
         # Should end at a newline boundary
         assert preview.endswith("\n")
 
     def test_single_line_truncates_at_max(self):
         """Single long line truncated at max_bytes exactly."""
         content = "x" * 5000  # No newlines
-        preview, has_more = generate_preview(content, max_bytes=100)
+        preview, has_more = generate_preview(content, max_chars=100)
         assert has_more is True
         assert len(preview) == 100
 
@@ -57,7 +57,7 @@ class TestGeneratePreview:
 
     def test_exact_boundary(self):
         """Content exactly at max_bytes returns as-is."""
-        content = "x" * PREVIEW_SIZE_BYTES
+        content = "x" * PREVIEW_SIZE_CHARS
         preview, has_more = generate_preview(content)
         assert preview == content
         assert has_more is False
@@ -66,7 +66,7 @@ class TestGeneratePreview:
         """Newline before halfway mark is ignored; truncation at max_bytes."""
         # Newline at position 10 out of 100 — way before halfway (50)
         content = "a" * 10 + "\n" + "b" * 200
-        preview, has_more = generate_preview(content, max_bytes=100)
+        preview, has_more = generate_preview(content, max_chars=100)
         assert has_more is True
         # Should NOT truncate at position 10 since it's before halfway
         assert len(preview) == 100
@@ -241,15 +241,11 @@ class TestMaybePersistToolResult:
             lambda name: custom_limit,
         )
         content = "x" * (custom_limit + 1)
-        # persist_large_result checks DEFAULT_MAX_RESULT_SIZE_CHARS internally,
-        # but maybe_persist_tool_result should still create the persisted message.
-        # Since content > custom_limit but <= DEFAULT_MAX_RESULT_SIZE_CHARS,
-        # persist_large_result returns None and we get original content back.
-        # This is expected behavior — Layer 2 threshold gates the call,
-        # but persist_large_result has its own floor.
         result = maybe_persist_tool_result(content, "small_tool", "id_6", tmp_path)
-        # Content is 1001 chars, well under 50K, so persist_large_result returns None
-        assert result == content
+        # Content exceeds the per-tool threshold (1001 > 1000) so it should
+        # be persisted even though it's well below the 50K default.
+        assert PERSISTED_OUTPUT_TAG in result
+        assert (tmp_path / "id_6.txt").exists()
 
 
 # ------------------------------------------------------------------ #
@@ -331,6 +327,35 @@ class TestEnforceTurnBudget:
         """Empty list returns empty list."""
         result = enforce_turn_budget([], tmp_path)
         assert result == []
+
+    def test_medium_results_under_default_threshold_still_persisted(self, tmp_path):
+        """Multiple 42K results (under 50K default) exceed 200K budget.
+
+        Regression test: L3 must force-persist even when individual results
+        are below DEFAULT_MAX_RESULT_SIZE_CHARS. Without threshold=0 in the
+        enforce_turn_budget call, these would all be skipped.
+        """
+        # 6 x 42K = 252K > 200K budget, but each is under 50K default
+        messages = [
+            {"content": "x" * 42_000, "tool_call_id": f"med_{i}"}
+            for i in range(6)
+        ]
+        total_before = sum(len(m["content"]) for m in messages)
+        assert total_before == 252_000
+        assert total_before > MAX_TURN_BUDGET_CHARS
+        # Each individual result is under the default 50K threshold
+        assert all(len(m["content"]) < DEFAULT_MAX_RESULT_SIZE_CHARS for m in messages)
+
+        result = enforce_turn_budget(messages, tmp_path)
+
+        persisted_count = sum(
+            1 for m in result if PERSISTED_OUTPUT_TAG in m["content"]
+        )
+        # At least one must be persisted to bring total under budget
+        assert persisted_count >= 1
+
+        total_after = sum(len(m["content"]) for m in result)
+        assert total_after < total_before
 
     def test_budget_parameter_respected(self, tmp_path):
         """Custom budget parameter is used instead of default."""
