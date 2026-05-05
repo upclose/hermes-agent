@@ -1,11 +1,13 @@
 """Shared utility functions for hermes-agent."""
 
+import functools
 import json
 import logging
 import os
 import tempfile
+import time
 from pathlib import Path
-from typing import Any, Union
+from typing import Any, Callable, Union
 
 import yaml
 
@@ -162,3 +164,75 @@ def env_int(key: str, default: int = 0) -> int:
 def env_bool(key: str, default: bool = False) -> bool:
     """Read an environment variable as a boolean."""
     return is_truthy_value(os.getenv(key, ""), default=default)
+
+
+# ─── Performance Optimization Helpers ───────────────────────────────────────
+
+
+def lru_cache_ttl(maxsize: int = 128, ttl_seconds: int = 300):
+    """LRU cache with time-to-live expiration.
+    
+    Args:
+        maxsize: Maximum number of cached entries.
+        ttl_seconds: Time-to-live for each cache entry in seconds.
+        
+    Returns:
+        Decorator that wraps a function with TTL-based LRU caching.
+    """
+    def decorator(func: Callable) -> Callable:
+        cache = {}
+        timestamps = {}
+        
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            key = (args, tuple(sorted(kwargs.items())))
+            current_time = time.time()
+            
+            # Check if cache is valid
+            if key in cache:
+                if current_time - timestamps[key] < ttl_seconds:
+                    return cache[key]
+                else:
+                    # Expired - remove from cache
+                    del cache[key]
+                    del timestamps[key]
+            
+            # Call function and cache result
+            result = func(*args, **kwargs)
+            
+            # Manage cache size
+            if len(cache) >= maxsize:
+                # Remove oldest entry
+                oldest_key = min(timestamps, key=timestamps.get)
+                del cache[oldest_key]
+                del timestamps[oldest_key]
+            
+            cache[key] = result
+            timestamps[key] = current_time
+            return result
+        
+        return wrapper
+    return decorator
+
+
+class PerformanceTimer:
+    """Simple performance timer for measuring execution time."""
+    
+    def __init__(self, name: str = "operation"):
+        self.name = name
+        self.start_time = None
+        self.end_time = None
+    
+    def __enter__(self):
+        self.start_time = time.time()
+        return self
+    
+    def __exit__(self, *args):
+        self.end_time = time.time()
+        logger.debug(f"{self.name} took {self.elapsed():.4f} seconds")
+    
+    def elapsed(self) -> float:
+        if self.start_time is None:
+            return 0.0
+        end = self.end_time or time.time()
+        return end - self.start_time
